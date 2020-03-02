@@ -15,6 +15,12 @@ LR_CRITIC = 3e-4        # learning rate of the critic
 WEIGHT_DECAY = 0.0001   # L2 weight decay
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
+def hidden_init(layer):
+    fan_in = layer.weight.data.size()[0]
+    lim = 1. / np.sqrt(fan_in)
+    return (-lim, lim)
+
 
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
@@ -54,21 +60,46 @@ class ReplayBuffer:
         """Return the current size of internal memory."""
         return min(len(self.memory[i]) for i in len(self.memory))
     
-class actorAgent:
+class ActorAgent:
     
-    def __init__(self, memory_size = 3):
+    def __init__(self, actorModel, memory_size = 3):
         self.memory_size = memory_size
         self.individual_memory = deque(maxlen=memory_size)
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
+        
+        self.local = actorModel
+        self.target = actorModel # soft updated copy of local model
+        self.optimizer = optim.Adam(self.local.parameters(), lr=LR_ACTOR, weight_decay=WEIGHT_DECAY)
         
     def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
         e = self.experience(state, action, reward, next_state, done)
         self.individual_memory.append(e)
+        
+    def learn(self, states):
+        # Compute actor loss
+        actions_pred = self.actor_local(states)
+        actor_loss = -self.critic_local(states, actions_pred).mean()
+        # Minimize the loss
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        self.actor_optimizer.step()
+        
+    def soft_update(self, local_model, target_model, tau):
+        """Soft update model parameters.
+        θ_target = τ*θ_local + (1 - τ)*θ_target
+        Params
+        ======
+            local_model: PyTorch model (weights will be copied from)
+            target_model: PyTorch model (weights will be copied to)
+            tau (float): interpolation parameter 
+        """
+        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
+            target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
 
         
         
-class criticAgent:
+class CriticAgent:
     
     def __init__(self, criticModel):
         """
@@ -76,7 +107,7 @@ class criticAgent:
         
         self.local = criticModel
         self.target = criticModel # soft updated copy of local model
-        self.optimizer = optim.Adam(self.critic_local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY)
+        self.optimizer = optim.Adam(self.local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY)
     
     def evaluate(self, states, actions, rewards, next_state, next_action, dones):
         """
@@ -128,10 +159,10 @@ class criticAgent:
             target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
     
     
-class Critic(nn.Module):
+class CriticModel(nn.Module):
     """Critic (Value) Model."""
 
-    def __init__(self, state_size, action_size, seed, fcs1_units=256, fc2_units=256, fc3_units=128):
+    def __init__(self, state_size, action_size, seed = 42, fcs1_units=256, fc2_units=256, fc3_units=128):
         """Initialize parameters and build model.
         Params
         ======
@@ -161,3 +192,31 @@ class Critic(nn.Module):
         x = F.leaky_relu(self.fc2(x))
         x = F.leaky_relu(self.fc3(x))
         return self.fc4(x)
+    
+class ActorModel(nn.Module):
+    """Actor (Policy) Model."""
+
+    def __init__(self, state_size, action_size, seed=42, fc_units=256):
+        """Initialize parameters and build model.
+        Params
+        ======
+            state_size (int): Dimension of each state
+            action_size (int): Dimension of each action
+            seed (int): Random seed
+            fc1_units (int): Number of nodes in first hidden layer
+            fc2_units (int): Number of nodes in second hidden layer
+        """
+        super(Actor, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.fc1 = nn.Linear(state_size, fc_units)
+        self.fc2 = nn.Linear(fc_units, action_size)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.fc1.weight.data.uniform_(*hidden_init(self.fc1))
+        self.fc2.weight.data.uniform_(-3e-3, 3e-3)
+
+    def forward(self, state):
+        """Build an actor (policy) network that maps states -> actions."""
+        x = F.relu(self.fc1(state))
+        return F.tanh(self.fc2(x))
