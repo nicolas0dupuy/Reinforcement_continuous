@@ -4,6 +4,7 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from collections import namedtuple, deque
 
 BUFFER_SIZE = int(1e6)  # replay buffer size
@@ -32,6 +33,7 @@ class ReplayBuffer:
             buffer_size (int): maximum size of buffer
             episode_len (int list): each int i of the list correspond to a memory deque for episodes of len i
         """
+        buffer_size = int(buffer_size)
         self.action_size = action_size
         self.batch_size = batch_size
         self.episode_len = episode_len
@@ -58,17 +60,18 @@ class ReplayBuffer:
 
     def __len__(self):
         """Return the current size of internal memory."""
-        return min(len(self.memory[i]) for i in len(self.memory))
+        return min(len(self.memory[i]) for i in range(len(self.memory)))
     
 class ActorAgent:
     
-    def __init__(self, actorModel, memory_size = 3):
+    def __init__(self, actorModel, criticAgent, memory_size = 3):
         self.memory_size = memory_size
         self.individual_memory = deque(maxlen=memory_size)
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
         
-        self.local = actorModel
-        self.target = actorModel # soft updated copy of local model
+        self.critic = criticAgent.local.to(device)
+        self.local = actorModel.to(device)
+        self.target = actorModel.to(device) # soft updated copy of local model
         self.optimizer = optim.Adam(self.local.parameters(), lr=LR_ACTOR, weight_decay=WEIGHT_DECAY)
         
     def add(self, state, action, reward, next_state, done):
@@ -76,10 +79,17 @@ class ActorAgent:
         e = self.experience(state, action, reward, next_state, done)
         self.individual_memory.append(e)
         
+    def act(self, state):
+        """
+        select an action from state
+        """
+        state = torch.from_numpy(state).float().to(device)
+        return self.local(state).cpu().data.numpy()
+        
     def learn(self, states):
         # Compute actor loss
-        actions_pred = self.actor_local(states)
-        actor_loss = -self.critic_local(states, actions_pred).mean()
+        actions_pred = self.local(states)
+        actor_loss = -criticAgent.local(states, actions_pred).mean()
         # Minimize the loss
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
@@ -105,8 +115,8 @@ class CriticAgent:
         """
         """
         
-        self.local = criticModel
-        self.target = criticModel # soft updated copy of local model
+        self.local = criticModel.to(device)
+        self.target = criticModel.to(device) # soft updated copy of local model
         self.optimizer = optim.Adam(self.local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY)
     
     def evaluate(self, states, actions, rewards, next_state, next_action, dones):
@@ -123,10 +133,10 @@ class CriticAgent:
         gammas = np.array([GAMMA**i for i in range(length)])
         discountedRewards = gammas*rewards
         # evaluate last next_state using target model
-        Qlast = self.target(next_state, next_action) * GAMMA**length
+        Qlast = self.target(torch.from_numpy(next_state).float().to(device), torch.from_numpy(next_action).float().to(device)).cpu().data.numpy() * GAMMA**length
         # sum to obtain the discounted reward
         Qest = np.sum(discountedRewards) + Qlast
-        return (state[0], action[0], Qest)
+        return (states[0], actions[0], Qest)
     
     def learn(self, states, actions, estimated_rewards, lrFactor = 1.):
         """
@@ -134,15 +144,21 @@ class CriticAgent:
         A batch of states, actions, and rewards from evaluate method
         lrFractor (float): learning rate discounter to take into account the importance of the current batch
         """
-        Q_expected = self.local(states, actions)
+        states, actions = torch.from_numpy(states).float().to(device), torch.from_numpy(actions).float().to(device)
+        # print("states: {}".format(states))
+        # print("actions: {}".format(actions))
+        Q_expected = self.local(states, actions) # .cpu().data.numpy()
+        estimated_rewards = torch.from_numpy(estimated_rewards).float().to(device)
+        print("Q_expected: {}".format(Q_expected))
+        print("estimated_rewards: {}".format(estimated_rewards))
         critic_loss = F.mse_loss(Q_expected, estimated_rewards)
         # Minimize the loss
-        self.critic_optimizer.zero_grad()
+        self.optimizer.zero_grad()
         critic_loss.backward()
         # optimize with learning rate adapted by lrFactor
-        self.optimizer.lr *= lrFactor
+        # self.optimizer.lr *= lrFactor
         self.optimizer.step()
-        self.optimizer.lr /= lrFactor
+        # self.optimizer.lr /= lrFactor
         # Soft update the target model
         self.soft_update(self.local, self.target, TAU)                     
 
@@ -172,9 +188,10 @@ class CriticModel(nn.Module):
             fcs1_units (int): Number of nodes in the first hidden layer
             fc2_units (int): Number of nodes in the second hidden layer
         """
-        super(Critic, self).__init__()
+        super(CriticModel, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.fcs1 = nn.Linear(state_size, fcs1_units)
+        self.fc2 = nn.Linear(fcs1_units+action_size, fc2_units)
         self.fc3 = nn.Linear(fc2_units, fc3_units)
         self.fc4 = nn.Linear(fc3_units, 1)
         self.reset_parameters()
@@ -187,7 +204,10 @@ class CriticModel(nn.Module):
 
     def forward(self, state, action):
         """Build a critic (value) network that maps (state, action) pairs -> Q-values."""
+        # print("state: {}".format(state))
+        # print("action: {}".format(action))
         xs = F.leaky_relu(self.fcs1(state))
+        # print("xs: {}".format(xs))
         x = torch.cat((xs, action), dim=1)
         x = F.leaky_relu(self.fc2(x))
         x = F.leaky_relu(self.fc3(x))
@@ -206,7 +226,7 @@ class ActorModel(nn.Module):
             fc1_units (int): Number of nodes in first hidden layer
             fc2_units (int): Number of nodes in second hidden layer
         """
-        super(Actor, self).__init__()
+        super(ActorModel, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.fc1 = nn.Linear(state_size, fc_units)
         self.fc2 = nn.Linear(fc_units, action_size)
