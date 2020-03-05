@@ -64,7 +64,7 @@ class ReplayBuffer:
     
 class ActorAgent:
     
-    def __init__(self, actorModel, criticAgent, memory_size = 3):
+    def __init__(self, actorModel, criticAgent, lr = LR_ACTOR , memory_size = 3):
         self.memory_size = memory_size
         self.individual_memory = deque(maxlen=memory_size)
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
@@ -72,28 +72,34 @@ class ActorAgent:
         self.critic = criticAgent.local.to(device)
         self.local = actorModel.to(device)
         self.target = actorModel.to(device) # soft updated copy of local model
-        self.optimizer = optim.Adam(self.local.parameters(), lr=LR_ACTOR, weight_decay=WEIGHT_DECAY)
+        self.lr = lr
+        self.optimizer = optim.Adam(self.local.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
+        self.noise = OUNoise(4, 42)
         
     def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
         e = self.experience(state, action, reward, next_state, done)
         self.individual_memory.append(e)
         
-    def act(self, state):
+    def act(self, state, add_noise=True):
         """
         select an action from state
         """
         state = torch.from_numpy(state).float().to(device)
-        return self.local(state).cpu().data.numpy()
+        action = self.local(state).cpu().data.numpy()
+        if add_noise:
+            action += self.noise.sample()
+        return action
         
     def learn(self, states):
         # Compute actor loss
+        states = torch.from_numpy(states).float().to(device)
         actions_pred = self.local(states)
-        actor_loss = -criticAgent.local(states, actions_pred).mean()
+        actor_loss = -self.critic(states, actions_pred).mean()
         # Minimize the loss
-        self.actor_optimizer.zero_grad()
+        self.optimizer.zero_grad()
         actor_loss.backward()
-        self.actor_optimizer.step()
+        self.optimizer.step()
         
     def soft_update(self, local_model, target_model, tau):
         """Soft update model parameters.
@@ -111,13 +117,15 @@ class ActorAgent:
         
 class CriticAgent:
     
-    def __init__(self, criticModel):
+    def __init__(self, criticModel, lr):
         """
         """
         
         self.local = criticModel.to(device)
         self.target = criticModel.to(device) # soft updated copy of local model
-        self.optimizer = optim.Adam(self.local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY)
+        self.lr = lr
+        self.optimizer = optim.Adam(self.local.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
+        
     
     def evaluate(self, states, actions, rewards, next_state, next_action, dones):
         """
@@ -149,8 +157,8 @@ class CriticAgent:
         # print("actions: {}".format(actions))
         Q_expected = self.local(states, actions) # .cpu().data.numpy()
         estimated_rewards = torch.from_numpy(estimated_rewards).float().to(device)
-        print("Q_expected: {}".format(Q_expected))
-        print("estimated_rewards: {}".format(estimated_rewards))
+        # print("Q_expected: {}".format(Q_expected))
+        # print("estimated_rewards: {}".format(estimated_rewards))
         critic_loss = F.mse_loss(Q_expected, estimated_rewards)
         # Minimize the loss
         self.optimizer.zero_grad()
@@ -191,8 +199,11 @@ class CriticModel(nn.Module):
         super(CriticModel, self).__init__()
         self.seed = torch.manual_seed(seed)
         self.fcs1 = nn.Linear(state_size, fcs1_units)
+        self.bn1 = nn.BatchNorm1d(fcs1_units)
         self.fc2 = nn.Linear(fcs1_units+action_size, fc2_units)
+        self.bn2 = nn.BatchNorm1d(fc2_units)
         self.fc3 = nn.Linear(fc2_units, fc3_units)
+        self.bn3 = nn.BatchNorm1d(fc3_units)
         self.fc4 = nn.Linear(fc3_units, 1)
         self.reset_parameters()
 
@@ -238,5 +249,27 @@ class ActorModel(nn.Module):
 
     def forward(self, state):
         """Build an actor (policy) network that maps states -> actions."""
-        x = F.relu(self.fc1(state))
+        x = F.leaky_relu(self.fc1(state))
         return F.tanh(self.fc2(x))
+    
+class OUNoise:
+    """Ornstein-Uhlenbeck process."""
+
+    def __init__(self, size, seed, mu=0., theta=0.15, sigma=0.2):
+        """Initialize parameters and noise process."""
+        self.mu = mu * np.ones(size)
+        self.theta = theta
+        self.sigma = sigma
+        self.seed = random.seed(seed)
+        self.reset()
+
+    def reset(self):
+        """Reset the internal state (= noise) to mean (mu)."""
+        self.state = copy.copy(self.mu)
+
+    def sample(self):
+        """Update internal state and return it as a noise sample."""
+        x = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.array([random.random() for i in range(len(x))])
+        self.state = x + dx
+        return self.state
