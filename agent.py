@@ -136,15 +136,15 @@ class CriticAgent:
         with respect to the whole sequence)
         """
         # Get the length of the sequence
-        length = len(states)
+        #length = len(states)
         # generate the discounted rewards sequence
-        gammas = np.array([GAMMA**i for i in range(length)])
-        discountedRewards = gammas*rewards
+        #gammas = np.array([GAMMA**i for i in range(length)])
+        #discountedRewards = gammas*rewards
         # evaluate last next_state using target model
-        Qlast = self.target(torch.from_numpy(next_state).float().to(device), torch.from_numpy(next_action).float().to(device)).cpu().data.numpy() * GAMMA**length
+        Qlast = self.target(torch.from_numpy(next_state).float().to(device), torch.from_numpy(next_action).float().to(device)).cpu().data.numpy() * GAMMA #**length ADAPT LATER TO LONG EPISODES
         # sum to obtain the discounted reward
-        Qest = np.sum(discountedRewards) + Qlast
-        return (states[0], actions[0], Qest)
+        Qest = rewards + Qlast  # Qest = np.sum(discountedRewards) + Qlast
+        return (states, actions, Qest)
     
     def learn(self, states, actions, estimated_rewards, lrFactor = 1.):
         """
