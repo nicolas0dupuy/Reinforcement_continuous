@@ -113,11 +113,23 @@ class ActorAgent:
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(tau*local_param.data + (1.0-tau)*target_param.data)
 
-        
+def mixed_loss(expected, from_eval, threshold = 0.05, weigths = [5, 1]):
+    """
+    weigthed loss for the critic to give more importance to the high rewards
+    """
+    if len(from_eval[from_eval >= threshold]) > 0:
+        a = F.mse_loss(expected[from_eval >= threshold], from_eval[from_eval >= threshold])
+    else:
+        a = 0
+    if len(from_eval[from_eval < threshold]) > 0:
+        b = F.mse_loss(expected[from_eval < threshold], from_eval[from_eval < threshold])
+    else:
+        b = 0
+    return weigths[0] * a + weigths[1] * b        
         
 class CriticAgent:
     
-    def __init__(self, criticModel, lr):
+    def __init__(self, criticModel, lr, lossthreshold = 0.05, lossweigths = [5, 1]):
         """
         """
         
@@ -125,6 +137,8 @@ class CriticAgent:
         self.target = criticModel.to(device) # soft updated copy of local model
         self.lr = lr
         self.optimizer = optim.Adam(self.local.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
+        self.lossthreshold = lossthreshold
+        self.lossweigths = lossweigths
         
     
     def evaluate(self, states, actions, rewards, next_state, next_action, dones):
@@ -159,7 +173,7 @@ class CriticAgent:
         estimated_rewards = torch.from_numpy(estimated_rewards).float().to(device)
         # print("Q_expected: {}".format(Q_expected))
         # print("estimated_rewards: {}".format(estimated_rewards))
-        critic_loss = F.mse_loss(Q_expected, estimated_rewards)
+        critic_loss = mixed_loss(Q_expected, estimated_rewards, self.lossthreshold, self.lossweigths)  # F.mse_loss(Q_expected, estimated_rewards)
         # Minimize the loss
         self.optimizer.zero_grad()
         critic_loss.backward()
