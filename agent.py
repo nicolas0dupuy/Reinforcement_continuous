@@ -217,11 +217,11 @@ class CriticModel(nn.Module):
         """Build a critic (value) network that maps (state, action) pairs -> Q-values."""
         # print("state: {}".format(state))
         # print("action: {}".format(action))
-        xs = F.leaky_relu(self.fcs1(state))
+        xs = F.tanh(self.fcs1(state))
         # print("xs: {}".format(xs))
         x = torch.cat((xs, action), dim=1)
-        x = F.leaky_relu(self.fc2(x))
-        x = F.leaky_relu(self.fc3(x))
+        x = F.tanh(self.fc2(x))
+        x = F.tanh(self.fc3(x))
         return self.fc4(x)
     
 class ActorModel(nn.Module):
@@ -249,7 +249,7 @@ class ActorModel(nn.Module):
 
     def forward(self, state):
         """Build an actor (policy) network that maps states -> actions."""
-        x = F.leaky_relu(self.fc1(state))
+        x = F.tanh(self.fc1(state))
         return F.tanh(self.fc2(x))
     
 class OUNoise:
