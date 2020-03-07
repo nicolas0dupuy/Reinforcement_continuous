@@ -85,6 +85,7 @@ class ActorAgent:
         """
         select an action from state
         """
+        # self.local.eval()
         state = torch.from_numpy(state).float().to(device)
         action = self.local(state).cpu().data.numpy()
         if add_noise:
@@ -92,6 +93,7 @@ class ActorAgent:
         return action
         
     def learn(self, states):
+        # self.local.train()
         # Compute actor loss
         states = torch.from_numpy(states).float().to(device)
         actions_pred = self.local(states)
@@ -126,10 +128,31 @@ def mixed_loss(expected, from_eval, threshold = 0.05, weigths = [5, 1]):
     else:
         b = 0
     return weigths[0] * a + weigths[1] * b        
-        
+
+def mixed_loss2(expected, from_eval, lim_range = 8):
+    """
+    weigthed loss for the critic to give more importance to the high rewards
+    """
+    cumul = 0
+    indiv = 0 
+    for i in range(lim_range):
+        thres = [0.01*i**2, 0.01*(i+1)**2]
+        crit = (from_eval >= thres[0]) * (from_eval < thres[1])
+        if len(from_eval[crit]) > 0:
+            indiv = (i+1)**2 * F.mse_loss(expected[crit], from_eval[crit])
+        else:
+            indiv = 0
+        cumul += indiv
+    if len(from_eval[from_eval < 0]) > 0:
+        cumul += 0.5 * F.mse_loss(expected[from_eval < 0], from_eval[from_eval < 0])
+    if len(from_eval[from_eval > 0.01*(lim_range + 1)**2]) > 0:
+        cumul += (lim_range +2)**2 * F.mse_loss(expected[from_eval > 0.01*(lim_range + 1)**2], from_eval[from_eval > 0.01*(lim_range + 1)**2])
+
+    return cumul
+
 class CriticAgent:
     
-    def __init__(self, criticModel, lr, lossthreshold = 0.05, lossweigths = [5, 1]):
+    def __init__(self, criticModel, lr, lossthreshold = 0.05, lossweigths = [5, 1], lim_range = 8):
         """
         """
         
@@ -139,6 +162,7 @@ class CriticAgent:
         self.optimizer = optim.Adam(self.local.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
         self.lossthreshold = lossthreshold
         self.lossweigths = lossweigths
+        self.lim_range = lim_range
         
     
     def evaluate(self, states, actions, rewards, next_state, next_action, dones):
@@ -173,7 +197,7 @@ class CriticAgent:
         estimated_rewards = torch.from_numpy(estimated_rewards).float().to(device)
         # print("Q_expected: {}".format(Q_expected))
         # print("estimated_rewards: {}".format(estimated_rewards))
-        critic_loss = mixed_loss(Q_expected, estimated_rewards, self.lossthreshold, self.lossweigths)  # F.mse_loss(Q_expected, estimated_rewards)
+        critic_loss = mixed_loss2(Q_expected, estimated_rewards, self.lim_range)  # F.mse_loss(Q_expected, estimated_rewards)
         # Minimize the loss
         self.optimizer.zero_grad()
         critic_loss.backward()
@@ -200,7 +224,7 @@ class CriticAgent:
 class CriticModel(nn.Module):
     """Critic (Value) Model."""
 
-    def __init__(self, state_size, action_size, seed = 42, fcs1_units=256, fc2_units=256, fc3_units=128):
+    def __init__(self, state_size, action_size, seed = 42, fcs1_units=128, fc2_units=64, fc3_units=128):
         """Initialize parameters and build model.
         Params
         ======
@@ -216,32 +240,32 @@ class CriticModel(nn.Module):
         self.bn1 = nn.BatchNorm1d(fcs1_units)
         self.fc2 = nn.Linear(fcs1_units+action_size, fc2_units)
         self.bn2 = nn.BatchNorm1d(fc2_units)
-        self.fc3 = nn.Linear(fc2_units, fc3_units)
-        self.bn3 = nn.BatchNorm1d(fc3_units)
-        self.fc4 = nn.Linear(fc3_units, 1)
+        # self.fc3 = nn.Linear(fc2_units, fc3_units)
+        # self.bn3 = nn.BatchNorm1d(fc2_units)
+        self.fc4 = nn.Linear(fc2_units, 1)
         self.reset_parameters()
 
     def reset_parameters(self):
         self.fcs1.weight.data.uniform_(*hidden_init(self.fcs1))
         self.fc2.weight.data.uniform_(*hidden_init(self.fc2))
-        self.fc3.weight.data.uniform_(*hidden_init(self.fc3))
+        #self.fc3.weight.data.uniform_(*hidden_init(self.fc3))
         self.fc4.weight.data.uniform_(-3e-3, 3e-3)
 
     def forward(self, state, action):
         """Build a critic (value) network that maps (state, action) pairs -> Q-values."""
         # print("state: {}".format(state))
         # print("action: {}".format(action))
-        xs = F.tanh(self.fcs1(state))
+        xs = F.leaky_relu(self.bn1(self.fcs1(state)))
         # print("xs: {}".format(xs))
         x = torch.cat((xs, action), dim=1)
-        x = F.tanh(self.fc2(x))
-        x = F.tanh(self.fc3(x))
-        return self.fc4(x)
+        x = F.leaky_relu(self.bn2(self.fc2(x)))
+        #x = F.tanh(self.fc3(x))
+        return F.sigmoid(self.fc4(x))
     
 class ActorModel(nn.Module):
     """Actor (Policy) Model."""
 
-    def __init__(self, state_size, action_size, seed=42, fc_units=256):
+    def __init__(self, state_size, action_size, seed=42, fc1_units=128, fc2_units=128, fc3_units=64):
         """Initialize parameters and build model.
         Params
         ======
@@ -253,8 +277,10 @@ class ActorModel(nn.Module):
         """
         super(ActorModel, self).__init__()
         self.seed = torch.manual_seed(seed)
-        self.fc1 = nn.Linear(state_size, fc_units)
-        self.fc2 = nn.Linear(fc_units, action_size)
+        self.fc1 = nn.Linear(state_size, fc1_units)
+        # self.bn1 = nn.BatchNorm1d(fc_units)
+        self.fc2 = nn.Linear(fc1_units, fc2_units)
+        self.fc3 = nn.Linear(fc2_units, action_size)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -263,8 +289,10 @@ class ActorModel(nn.Module):
 
     def forward(self, state):
         """Build an actor (policy) network that maps states -> actions."""
-        x = F.tanh(self.fc1(state))
-        return F.tanh(self.fc2(x))
+        x = F.leaky_relu(self.fc1(state))
+        # x = self.bn1(x)
+        x = F.leaky_relu(self.fc2(x))
+        return F.tanh(self.fc3(x))
     
 class OUNoise:
     """Ornstein-Uhlenbeck process."""
